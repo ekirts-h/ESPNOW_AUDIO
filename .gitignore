@@ -6,8 +6,8 @@
 .ko
 .obj
 .elf
-/src/SPDIF.c
-/include/SPDIF.h
+src/SPDIF.c
+include/SPDIF.h
 # Linker output
 .ilk
 .map
