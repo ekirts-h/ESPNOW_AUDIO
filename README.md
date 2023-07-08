@@ -9,7 +9,7 @@ max ~0.22A for esp32(SOURCE) and ~0.12A for ESP32-S3(SINK)
 Slight delay between source and sink side playback. 
 
 ToDO cleanup code, change wifi menuconfig settings for rx/tx.
-Find out whether the occasional audio glitches are caused by the source side and sink side clock mismatch, dropped frames by controller, solved by a larger buffer(and longer delay) or something else.
+change to ring buffer
 
 MCS7/54MB is too susceptible to interference and packet loss, useless for this function. Version with external antenna may work better?
 Very weak to microwave.
