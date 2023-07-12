@@ -412,14 +412,14 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
             espnow_seq[buf->type] = 0;
             //xSemaphoreGive(i2s_sync_h);
             //xSemaphoreTake(xsh, portMAX_DELAY);
-            if (xRingbufferGetCurFreeSize(rbuf_handle) == xRingbufferGetMaxItemSize(rbuf_handle))
-            {
+             if (xRingbufferGetCurFreeSize(rbuf_handle) == xRingbufferGetMaxItemSize(rbuf_handle))
+             {
                 //     ESP_LOGE(TAG, "Underrun");
                 while (xRingbufferGetCurFreeSize(rbuf_handle) > xRingbufferGetMaxItemSize(rbuf_handle) / 2)
                 {
                     xSemaphoreTake(xsh, pdMS_TO_TICKS(50));
                 }
-            }
+             }
         }
            // payload_buf = xRingbufferReceive(rbuf_handle, &buffer_size, pdMS_TO_TICKS(100) );
             
@@ -1174,7 +1174,7 @@ void app_main()
     }
 #endif
 #ifdef IS_SOURCE
-    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t)/* * 2 */, RINGBUF_TYPE_BYTEBUF);// RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
+    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t) /* * 2 */, RINGBUF_TYPE_BYTEBUF);// RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
     if(rbuf_handle == NULL){
         ESP_LOGE(TAG, "ERR Failed to create buffer");   
     }else{
