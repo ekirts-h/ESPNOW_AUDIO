@@ -19,17 +19,38 @@ static bool paired_w_source;
 static uint16_t ESPNOW_SEND_DELAY = 1000; // 2; //set so that all data sent before next batch of i2s data // Delay between sending two ESPNOW data, unit: ms. //  range 0 65535 default 1000
 #endif
 #endif
+
+#define I2S_BUF_SIZ 10240
 // #pragma endregion ESPNOW_CONFIG
 
 // #pragma region I2S_CONFIG
 static uint32_t SAMPLE_RATE = 48000;                             // 96000U;
-static i2s_data_bit_width_t BIT_RATE = I2S_DATA_BIT_WIDTH_32BIT; // I2S_DATA_BIT_WIDTH_32BIT;
-static uint16_t DMA_FRAME_NUM = 256;
-static uint8_t DMA_DESC_NUM = 4; // 3 or 4 seems to work best with minimal delay
+static i2s_data_bit_width_t BIT_DEPTH = I2S_DATA_BIT_WIDTH_32BIT; // I2S_DATA_BIT_WIDTH_32BIT;
+static uint16_t DMA_FRAME_NUM = 128;
+static uint8_t DMA_DESC_NUM = 2; // 3 or 4 seems to work best with minimal delay
 static uint8_t bytes_per_sample = 4;
 static size_t bytes_to_read;
+//ring buffer index
+uint32_t rbuffer_start, rbuffer_end;
+uint8_t PAYLOAD_SIZE;
 
-#define I2S_BUF_SIZ 10240
+// static uint16_t I2S_BUF_SIZ = 2048;
+RingbufHandle_t rbuf_handle;
+static bool paired;
+SemaphoreHandle_t xsh = NULL;
+SemaphoreHandle_t i2s_sync_h = NULL;
+#ifdef IS_SINK
+uint32_t ESPNOW_I2S_BUF[I2S_BUF_SIZ];
+#endif
+volatile size_t bSent;
+static uint16_t espnow_seq[ESPNOW_DATA_MAX] = {0, 0};
+static uint8_t filler_data[ESPNOW_MAX_PAYLOAD_SIZE] = {0};
+//led indication for paired
+
+//remove pairing after no data is received for few seconds
+
+//make this a ring buffer
+
 
 #ifdef IS_SOURCE
 DMA_ATTR uint32_t I2S_RX_BUF[I2S_BUF_SIZ];
@@ -113,19 +134,11 @@ i2s_std_config_t i2s_port_conf = {
 
 //
 
-// static uint16_t I2S_BUF_SIZ = 2048;
 
-static bool paired;
-SemaphoreHandle_t xsh = NULL;
-SemaphoreHandle_t i2s_sync_h = NULL;
-
-uint32_t ESPNOW_I2S_BUF[I2S_BUF_SIZ];
-volatile size_t bSent;
-static uint16_t espnow_seq[ESPNOW_DATA_MAX] = {0, 0};
 
 static void set_i2s_params()
 {
-    bytes_per_sample = BIT_RATE / 8;
+    bytes_per_sample = BIT_DEPTH / 8;
     /*Taking audio as our example - suppose we are sampling in stereo at 44.1KHz with 16 bits per sample - this gives a data transfer rate of around 176KBytes per second.
 
 If we had a DMA buffer size of 8 samples, we’d be interrupting the CPU every 181 microseconds.
@@ -176,7 +189,7 @@ static void espnow_deinit(espnow_send_param_t *send_param)
 // static uint16_t set_espnow_send_delay(){
 //     //must send 12288 bytes before next i2s
 //     //uint16_t delay;//ms
-//     //uint32_t bytes_ps = SAMPLE_RATE * BIT_RATE * 2 / 8; //sample_rate * bit_rate* 2 / 8 = sample bytes per second
+//     //uint32_t bytes_ps = SAMPLE_RATE * BIT_DEPTH * 2 / 8; //sample_rate * BIT_DEPTH* 2 / 8 = sample bytes per second
 //     //I2S_BUF_SIZ / bytes_ps = seconds
 
 //     //delay = I2S_BUF_SIZ;
@@ -187,7 +200,7 @@ static void espnow_deinit(espnow_send_param_t *send_param)
 // set payload size small if sink
 //  static uint8_t set_espnow_payload_size(){
 //      uint8_t payload_size;
-//      uint32_t i2s_data_byte_count = (BIT_RATE * SAMPLE_RATE * 2) / 8; //per second
+//      uint32_t i2s_data_byte_count = (BIT_DEPTH * SAMPLE_RATE * 2) / 8; //per second
 //      payload_size = (uint8_t)ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t);
 
 //     while(i2s_data_byte_count % payload_size > 0 && i2s_data_byte_count ){
@@ -200,7 +213,7 @@ static void espnow_deinit(espnow_send_param_t *send_param)
 // static uint8_t set_espnow_send_count(){
 //     //send count should be max by next i2s data
 //     uint8_t payload_size;
-//     uint32_t i2s_data_byte_count = (BIT_RATE * SAMPLE_RATE * 2) / 8; //per second
+//     uint32_t i2s_data_byte_count = (BIT_DEPTH * SAMPLE_RATE * 2) / 8; //per second
 //     payload_size = (uint8_t)ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t);
 
 //     while(i2s_data_byte_count % payload_size > 0 && i2s_data_byte_count ){
@@ -216,9 +229,11 @@ IRAM_ATTR static void i2s_rec_task(void *pvParameters)
 {
     size_t bytes_read;
     // uint8_t audio_buffer[1024];
-    bytes_to_read = i2s_ch_conf.dma_desc_num * i2s_ch_conf.dma_frame_num * BIT_RATE * 2 / 8;
+    bytes_to_read = i2s_ch_conf.dma_desc_num * i2s_ch_conf.dma_frame_num * BIT_DEPTH * 2 / 8;
     while (1)
     {
+
+        //recalculate bytes to read if the config changes
 
         // Read audio data from I2S
         // i2s_read(I2S_NUM, audio_buffer, sizeof(audio_buffer), &bytes_read, portMAX_DELAY);
@@ -227,11 +242,24 @@ IRAM_ATTR static void i2s_rec_task(void *pvParameters)
 
         // ESP_LOGI(TAG, "Start I2S Read");
 
-        err_status = i2s_channel_read(i2s0_rx_handler, I2S_RX_BUF, bytes_to_read, &bytes_read, portMAX_DELAY);
-        // ESP_LOGI(TAG, "I2S Read, Copying to ESPNOW buffer");
-        xSemaphoreTake(i2s_sync_h, portMAX_DELAY);
+        err_status = i2s_channel_read(i2s0_rx_handler, I2S_RX_BUF, bytes_to_read, &bytes_read, pdMS_TO_TICKS(1000));//portMAX_DELAY);
+         //ESP_LOGI(TAG, "I2S Read, Copying to ESPNOW buffer");
+         
+        if(xRingbufferGetCurFreeSize(rbuf_handle) < bytes_read){//xRingbufferGetMaxItemSize(rbuf_handle) /4 ){//<= bytes_read){
+
+            xSemaphoreTake(i2s_sync_h, pdMS_TO_TICKS(1000));
+            continue;
+        }
         bRead = bytes_read;
-        memcpy(ESPNOW_I2S_BUF, I2S_RX_BUF, bRead);
+        //memcpy(ESPNOW_I2S_BUF, I2S_RX_BUF, bRead);
+       // ESP_LOGI(TAG, "Took Semaphore");
+       // if(xRingbufferGetCurFreeSize(rbuf_handle) < bytes_read){
+        //    ESP_LOGE(TAG, "Overrun");
+       // }
+        if(xRingbufferSend(rbuf_handle, I2S_RX_BUF, bytes_read, pdMS_TO_TICKS(1000)) != pdTRUE){
+            ESP_LOGI(TAG, "ERR failed to dump data into ring buffer");
+        }
+       // ESP_LOGI(TAG, "Dumped data into buffer %u", bytes_read);
         xSemaphoreGive(xsh);
         // ESP_LOGI(TAG, "I2S, Starting next read");
         // xSemaphoreTake(xsh);
@@ -285,18 +313,50 @@ static void i2s_spdif_task(void *pvParameters)
 {
     // size_t bytes_read;
     // uint8_t audio_buffer[1024];
-
+    uint8_t *frame_buf_ptr;
+    //uint8_t *frame_buf_ptr_wrap;
+    size_t data_siz;
+   // size_t data_siz_remaining;
     while (1)
     {
         // wait until data is ready
-        xSemaphoreGive(xsh);
-        xSemaphoreTake(i2s_sync_h, portMAX_DELAY);
-        esp_err_t err_status;
-        spdif_write(I2S_TX_BUF, bSent);
-        //xSemaphoreGive(xsh);
-        if (err_status == ESP_OK)
-        {
+       // xSemaphoreGive(xsh);
+        //xSemaphoreTake(i2s_sync_h, portMAX_DELAY);
+        
+        //try retrieve data from the ringbuffer
+        frame_buf_ptr = (uint8_t*)xRingbufferReceiveUpTo(rbuf_handle, &data_siz, pdMS_TO_TICKS(5000), bSent);
+
+        //two calls to RingbufferReceiveUpTo() if data wraps around
+        //if()
+        //esp_err_t err_status;
+        //check that data was available in buffer
+        if(frame_buf_ptr != NULL){
+            //check for data wrap around
+            if( data_siz < bSent ){
+                //data wraps around so append wrapped data to retrieved data
+                memcpy(I2S_TX_BUF, frame_buf_ptr, data_siz);
+                vRingbufferReturnItem(rbuf_handle,(void*) frame_buf_ptr);
+                frame_buf_ptr = (uint8_t*)xRingbufferReceiveUpTo(rbuf_handle, &data_siz, pdMS_TO_TICKS(5000), bSent-data_siz);
+                memcpy(((uint8_t*)I2S_TX_BUF) + (bSent - data_siz), frame_buf_ptr, data_siz);
+                spdif_write(I2S_TX_BUF, bSent);
+                //spdif_write(I2S_TX_BUF, bSent);
+                vRingbufferReturnItem(rbuf_handle,(void*) frame_buf_ptr);
+
+            }else{
+                //no wrap around so process as is
+                spdif_write(frame_buf_ptr, data_siz);
+                //spdif_write(I2S_TX_BUF, bSent);
+                vRingbufferReturnItem(rbuf_handle,(void*) frame_buf_ptr);
+            }
+        }else{
+            ESP_LOGI(TAG, "I2S too fast, Buffer Underrun waiting for more data");
+            xSemaphoreTake(i2s_sync_h, portMAX_DELAY);
         }
+        xSemaphoreGive(xsh);
+        //xSemaphoreGive(xsh);
+        // if (err_status == ESP_OK)
+        // {
+        // }
     }
 }
 
@@ -342,49 +402,119 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
     {
 #ifdef IS_SOURCE
 
-        // send_param->len = ESPNOW_MAX_PAYLOAD_SIZE;// - sizeof(espnow_data_t);
-        // wait for new data if sending finished before new data is available
-        //  if(bRead == 0){
-        //       xSemaphoreTake(i2s_sync_h, portMAX_DELAY);
-        //  }
-        if (bRead == 0 && bSent == 0)
+    //implements ring buffer
+        size_t buffer_size = 0;
+        uint8_t *payload_buf;
+        if (bSent == 0)
         {
-            // ESP_LOGI(TAG, "Waiting for I2S data");
+            //ESP_LOGI(TAG, "Waiting for I2S data");
             buf->src_sink |= espnow_bd_SOF_L;
             espnow_seq[buf->type] = 0;
-            xSemaphoreGive(i2s_sync_h);
-            xSemaphoreTake(xsh, portMAX_DELAY);
+            //xSemaphoreGive(i2s_sync_h);
+            //xSemaphoreTake(xsh, portMAX_DELAY);
+            if (xRingbufferGetCurFreeSize(rbuf_handle) == xRingbufferGetMaxItemSize(rbuf_handle))
+            {
+                //     ESP_LOGE(TAG, "Underrun");
+                while (xRingbufferGetCurFreeSize(rbuf_handle) > xRingbufferGetMaxItemSize(rbuf_handle) / 2)
+                {
+                    xSemaphoreTake(xsh, pdMS_TO_TICKS(50));
+                }
+            }
         }
-        uint8_t *ptr = ((uint8_t *)ESPNOW_I2S_BUF) + bSent;
-        tmp = bRead - bSent;
-        buf->seq_num = espnow_seq[buf->type]++;
+           // payload_buf = xRingbufferReceive(rbuf_handle, &buffer_size, pdMS_TO_TICKS(100) );
+            
+           // memcpy(buf->payload, payload_buf, buffer_size);
+        //ESP_LOGI(TAG, "transmitted  %d / %d", bSent, bRead);
+        //  if(xRingbufferGetCurFreeSize(rbuf_handle) == xRingbufferGetMaxItemSize(rbuf_handle)){
+        // //     ESP_LOGE(TAG, "Underrun");
+        
+        //     xSemaphoreTake(xsh, pdMS_TO_TICKS(1000));
+        //  }
+        if(bSent + PAYLOAD_SIZE > bRead){
+            payload_buf = (uint8_t*)xRingbufferReceiveUpTo(rbuf_handle, &buffer_size, pdMS_TO_TICKS(100), bRead - bSent);//(size_t)PAYLOAD_SIZE);
+            //ESP_LOGI(TAG, "Reading Buffer %u", bRead - bSent);
+        }else{
+            payload_buf = (uint8_t*)xRingbufferReceiveUpTo(rbuf_handle, &buffer_size, pdMS_TO_TICKS(100), PAYLOAD_SIZE);//(size_t)PAYLOAD_SIZE);
+            //ESP_LOGI(TAG, "Reading Buffer %u", PAYLOAD_SIZE);
+        }
+        if(payload_buf != NULL){
+            //check and process wrap around
 
-        if (tmp >= ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t))
-        {
-            memcpy(buf->payload, ptr, ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t));
-            bSent += ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t);
-            send_param->len = ESPNOW_MAX_PAYLOAD_SIZE;
-        }else
-        {
-            memcpy(buf->payload, ptr, tmp);
-            bSent += tmp;
-            send_param->len = tmp + sizeof(espnow_data_t);
+            if(!(buffer_size == bRead - bSent) && !(buffer_size == PAYLOAD_SIZE)){
+                memcpy(buf->payload, payload_buf, buffer_size);
+                vRingbufferReturnItem(rbuf_handle, (void*)payload_buf);
+                if(bSent + PAYLOAD_SIZE > bRead){
+                    payload_buf = (uint8_t*)xRingbufferReceiveUpTo(rbuf_handle, &buffer_size, pdMS_TO_TICKS(100), bRead - bSent - buffer_size);//(size_t)PAYLOAD_SIZE);
+                    memcpy(buf->payload + bRead - bSent, payload_buf, buffer_size);
+
+                    //ESP_LOGI(TAG, "Reading Buffer %u", bRead - bSent);
+                }else{
+                    payload_buf = (uint8_t*)xRingbufferReceiveUpTo(rbuf_handle, &buffer_size, pdMS_TO_TICKS(100), PAYLOAD_SIZE - buffer_size);//(size_t)PAYLOAD_SIZE);
+                    memcpy(buf->payload + PAYLOAD_SIZE - buffer_size, payload_buf, buffer_size);
+                    //ESP_LOGI(TAG, "Reading Buffer %u", PAYLOAD_SIZE);
+                }
+                vRingbufferReturnItem(rbuf_handle, (void*)payload_buf);
+            }else{
+                //ESP_LOGI(TAG, "Read buffer %u",buffer_size );
+                memcpy(buf->payload, payload_buf, buffer_size);
+                vRingbufferReturnItem(rbuf_handle, (void*)payload_buf);
+            }
+
+
+            bSent += buffer_size;
+            buf->seq_num = espnow_seq[buf->type]++;
+            send_param->len = buffer_size + sizeof(espnow_data_t);
+            if (bSent == bRead)
+            {
+                // allow i2s to retrieve new data
+                // xSemaphoreGive(i2s_sync_h);
+            // ESP_LOGI(TAG, "END  %d / %d", bSent, bRead);
+                ESP_LOGI(TAG, "END  %d / %d ", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
+
+                buf->src_sink |= espnow_bd_EOF;
+                //ESP_LOGI(TAG, "Send Done");
+                bSent = 0;
+                //bRead = 0;
+            }
         }
-        /* if(bSent == bRead){
-             ESP_LOGI(TAG, "Buf processed: %d, Buf Total:%d", bSent, bRead);
-         }*/
-        // ESP_LOGI(TAG, "data %d / %d sent", bsent, bRead);
-        // ESP_LOGI(TAG, "data %d / %d", bSent, bRead);
-        if (bSent == bRead)
-        {
-            // allow i2s to retrieve new data
-            // xSemaphoreGive(i2s_sync_h);
-            //ESP_LOGI(TAG, "END  %d / %d", bSent, bRead);
-            buf->src_sink |= espnow_bd_EOF;
-            // ESP_LOGI(TAG, "Send Done");
-            bSent = 0;
-            bRead = 0;
-        }
+        //ESP_LOGI(TAG, "Send  %d / %d", bSent, bRead);
+
+
+
+
+
+        // uint8_t *ptr = ((uint8_t *)ESPNOW_I2S_BUF) + bSent;
+        // tmp = bRead - bSent;
+        // buf->seq_num = espnow_seq[buf->type]++;
+
+        // if (tmp >= ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t))
+        // {
+        //     memcpy(buf->payload, ptr, ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t));
+        //     bSent += ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t);
+        //     send_param->len = ESPNOW_MAX_PAYLOAD_SIZE;
+        // }else
+        // {
+        //     memcpy(buf->payload, ptr, tmp);
+        //     bSent += tmp;
+        //     send_param->len = tmp + sizeof(espnow_data_t);
+        // }
+        // //  if(bSent == bRead){
+        // //      ESP_LOGI(TAG, "Buf processed: %d, Buf Total:%d", bSent, bRead);
+        // //  }
+        // // ESP_LOGI(TAG, "data %d / %d sent", bsent, bRead);
+        // // ESP_LOGI(TAG, "data %d / %d", bSent, bRead);
+        // if (bSent == bRead)
+        // {
+        //     // allow i2s to retrieve new data
+        //     // xSemaphoreGive(i2s_sync_h);
+        //     //ESP_LOGI(TAG, "END  %d / %d", bSent, bRead);
+        //     buf->src_sink |= espnow_bd_EOF;
+        //     // ESP_LOGI(TAG, "Send Done");
+        //     bSent = 0;
+        //     bRead = 0;
+        // }
+
+
 #endif
     }
     else
@@ -402,7 +532,7 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
         buf->payload[2] = (uint8_t)((SAMPLE_RATE >> 16) & 0xFF);
         buf->payload[3] = (uint8_t)((SAMPLE_RATE >> 8 & 0xFF));
         buf->payload[4] = (uint8_t)(SAMPLE_RATE & 0xFF);
-        buf->payload[5] = BIT_RATE;
+        buf->payload[5] = BIT_DEPTH;
         // UINT16_MAX;
         // set sample rate
         // set bit rate
@@ -524,10 +654,10 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
         {
             paired = true;
             SAMPLE_RATE = ((uint32_t)buf->payload[1] << 24) | ((uint32_t)buf->payload[2] << 16) | ((uint32_t)buf->payload[3] << 8) | (uint32_t)buf->payload[4];
-            BIT_RATE = buf->payload[5];
-            ESP_LOGI(TAG, "SampleRate %lu: BitRate:%u", SAMPLE_RATE, BIT_RATE);
+            BIT_DEPTH = buf->payload[5];
+            ESP_LOGI(TAG, "SampleRate %lu: BitRate:%u", SAMPLE_RATE, BIT_DEPTH);
             // i2s_port_conf.clk_cfg.sample_rate_hz = SAMPLE_RATE;
-            // i2s_port_conf.slot_cfg.data_bit_width = BIT_RATE;
+            // i2s_port_conf.slot_cfg.data_bit_width = BIT_DEPTH;
             // if (i2s0_tx_handler == NULL)
             // {
             //     i2s_new_channel(&i2s_ch_conf, &i2s0_tx_handler, NULL);
@@ -546,7 +676,7 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
             // i2s_channel_enable(i2s0_tx_handler);
             //  xTaskCreate(i2s_tx_task, "i2s_tx_task", 4096, NULL, 2, NULL);//2048
 #ifdef EN_SPDIF
-            spdif_init(SAMPLE_RATE, BIT_RATE);
+            spdif_init(SAMPLE_RATE, BIT_DEPTH);
             //
             if(xTaskGetHandle("i2s_spdif_task") == NULL){
                 xTaskCreate(i2s_spdif_task, "i2s_spdif_task", 8192, NULL, 13, NULL); // 2048
@@ -567,29 +697,14 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
 
 #else
 #ifdef IS_SINK
-        // xSemaphoreTake(xsh, portMAX_DELAY);
 
-        // needs code to sync the L/R data to i2s and start of sample
-        // sync to this
-        // if sink is syncing to source mid transfer then wait for SOF
-        if ((buf->src_sink & espnow_bd_SOF_L) == espnow_bd_SOF_L)
-        {
-            if (idx != 0)
-            {
-                ESP_LOGE(TAG, "ESPNOW Sink Out of Sync");
-                /* code */
-            }
-
-            idx = 0;
-        }
-        //
         uint8_t *ptr = (uint8_t *)ESPNOW_I2S_BUF;
         // ESP_LOGI(TAG, "Processing unicast payload size %u num: %d", data_len, buf->seq_num);
         if (seq_prev == 0 && idx == 0 && buf->seq_num > 0)
         {
             seq_prev = buf->seq_num - 1;
         }
-        else if (seq_prev != buf->seq_num - 1) // && !(seq_prev != UINT16_MAX && *seq != 0)){// && !(seq_prev == UINT16_MAX && *seq == 0))
+        else if ((seq_prev != buf->seq_num - 1) && !((buf->seq_num == 0 && seq_prev > 0) || (buf->seq_num == 0 && seq_prev == 0))) // && !(seq_prev != UINT16_MAX && *seq != 0)){// && !(seq_prev == UINT16_MAX && *seq == 0))
         {
             ESP_LOGI(TAG, "Packet Lost prev: %d current %d", seq_prev, buf->seq_num);
             while (seq_prev < buf->seq_num - 1)
@@ -611,7 +726,8 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
                 // idx += data_len - sizeof(espnow_data_t);
                 if (idx == sizeof(ESPNOW_I2S_BUF))
                 {
-                    memcpy(I2S_TX_BUF, ESPNOW_I2S_BUF, sizeof(ESPNOW_I2S_BUF));
+                    //memcpy(I2S_TX_BUF, ESPNOW_I2S_BUF, sizeof(ESPNOW_I2S_BUF));
+                    xRingbufferSend(rbuf_handle, ESPNOW_I2S_BUF, idx, pdMS_TO_TICKS(1000));
                     idx = 0;
                 }
             }
@@ -630,28 +746,47 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
             memcpy(ptr + idx, buf->payload, data_len - sizeof(espnow_data_t));
             idx += data_len - sizeof(espnow_data_t);
         }
-
+        seq_prev = buf->seq_num;
         if ((buf->src_sink & espnow_bd_EOF) == espnow_bd_EOF)
         {
           
-            xSemaphoreTake(xsh, portMAX_DELAY);// == pdTRUE;
-            memcpy(I2S_TX_BUF, ESPNOW_I2S_BUF, idx);
-            xSemaphoreGive(i2s_sync_h);
+            //xSemaphoreTake(xsh, portMAX_DELAY);// == pdTRUE;
+           // memcpy(I2S_TX_BUF, ESPNOW_I2S_BUF, idx);
+
+           //dump the accumulated data into ring buffer for the i2s peripheral to process when ready
+           
+            while(xRingbufferGetCurFreeSize(rbuf_handle) < idx){
+                ESP_LOGI(TAG, "I2S too slow, buffer overrun. Waiting for more free space in buffer");
+                xSemaphoreTake(xsh, portMAX_DELAY);
+
+            }
+            if(xRingbufferSend(rbuf_handle, ESPNOW_I2S_BUF, idx, pdMS_TO_TICKS(1000)) != pdTRUE){
+                ESP_LOGI(TAG, "Ring Buffer Send Error");
+            }
+            //if(xSemaphoreTake(i2s_sync_h, 0) == pdTRUE){
+                xSemaphoreGive(i2s_sync_h);
+            //}else{
+              //  xSemaphoreGive(i2s_sync_h);
+            //}
+            
+            //ESP_LOGI(TAG, "End of frame %lu / %u", idx, sizeof(ESPNOW_I2S_BUF));
+            //xSemaphoreGive(i2s_sync_h);
             bSent = idx;
             idx = 0;
             // }
+                    seq_prev = 0;
         }
         else if (idx == sizeof(ESPNOW_I2S_BUF) && (buf->src_sink & espnow_bd_EOF) != espnow_bd_EOF)
         {
             ESP_LOGE(TAG, "EOF missing Copying to I2S Buffer from ESPNOW buffer");
             xSemaphoreTake(xsh, portMAX_DELAY);
-            memcpy(I2S_TX_BUF, ESPNOW_I2S_BUF, sizeof(ESPNOW_I2S_BUF));
+            //memcpy(I2S_TX_BUF, ESPNOW_I2S_BUF, sizeof(ESPNOW_I2S_BUF));
             xSemaphoreGive(i2s_sync_h);
 
             idx = 0;
         }
 
-        seq_prev = buf->seq_num;
+
         // ESP_LOGI(TAG, "%lu / %d", idx, sizeof(ESPNOW_I2S_BUF) );
         // xSemaphoreGive(xsh);
 #endif
@@ -702,24 +837,12 @@ IRAM_ATTR static void espnow_task(void *pvParameter)
         {
             espnow_event_send_cb_t *send_cb = &evt.info.send_cb;
             is_broadcast = IS_BROADCAST_ADDR(send_cb->mac_addr);
-
-            if (is_broadcast && (send_param->broadcast == false))
+            if (is_broadcast)
             {
-                break;
-            }
-
-            if (!is_broadcast)
-            {
-                // #ifdef IS_SOURCE
-                //                 send_param->count--;
-                //                 if (send_param->count == 0)
-                //                 {
-                //                     send_param->count = ESPNOW_SEND_COUNT;
-                //                 }
-                // #endif
-            }
-            else
-            {
+                if (send_param->broadcast == false)
+                {
+                    break;
+                }
                 ESP_LOGD(TAG, "Sent Broadcast_x");
                 /* Delay a while before sending the next data. */
                 if (send_param->delay > 0)
@@ -1040,16 +1163,36 @@ void app_main()
     // set all i2s config here
 
     //
+    //separate unicast tx thread
+    PAYLOAD_SIZE = ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t);
+#ifdef IS_SINK
+    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t) * 2 , RINGBUF_TYPE_BYTEBUF);// RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
+    if(rbuf_handle == NULL){
+        ESP_LOGE(TAG, "ERR Failed to create buffer");   
+    }else{
+        ESP_LOGI(TAG, "Created Ring Buffer");   
+    }
+#endif
+#ifdef IS_SOURCE
+    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t)/* * 2 */, RINGBUF_TYPE_BYTEBUF);// RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
+    if(rbuf_handle == NULL){
+        ESP_LOGE(TAG, "ERR Failed to create buffer");   
+    }else{
+        ESP_LOGI(TAG, "Created Ring Buffer remaining heap %lu", esp_get_free_heap_size() );   
+    }
+#endif
+
+
 
 #ifdef IS_SOURCE
     i2s_port_conf.clk_cfg.sample_rate_hz = SAMPLE_RATE;
-    i2s_port_conf.slot_cfg.data_bit_width = BIT_RATE;
+    i2s_port_conf.slot_cfg.data_bit_width = BIT_DEPTH;
     i2s_ch_conf.dma_desc_num = DMA_DESC_NUM;
     i2s_ch_conf.dma_frame_num = DMA_FRAME_NUM;
     i2s_new_channel(&i2s_ch_conf, NULL, &i2s0_rx_handler);
     i2s_channel_init_std_mode(i2s0_rx_handler, &i2s_port_conf);
     i2s_channel_enable(i2s0_rx_handler);
-    xTaskCreate(i2s_rec_task, "i2s_rec_task", 4096, NULL, 16, NULL); // 2048
+    xTaskCreate(i2s_rec_task, "i2s_rec_task", 2048, NULL, 16, NULL); // 2048
 #ifdef EN_SPDIF
     spdif_init(96000);
     xTaskCreate(i2s_spdif_task, "i2s_spdif_task", 4096, NULL, 2, NULL); // 2048
