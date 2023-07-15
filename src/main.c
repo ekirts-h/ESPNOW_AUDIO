@@ -9,10 +9,10 @@ static const char *TAG = "ESP_NOW_32-S3";
 #endif
 
 // #pragma region ESPNOW_CONFIG
-static uint16_t ESPNOW_SEND_COUNT = 64; // set so that count reaches zero before next batch of data is retrieved
+static uint16_t ESPNOW_SEND_COUNT = 128; 
 //static uint8_t ESPNOW_SEND_LEN = 250;   // set to SAMPLE_RATE / x  <= 240 and   SAMPLE_RATE % SEND_LEN = 0
 #ifdef IS_SOURCE
-static uint16_t ESPNOW_SEND_DELAY = 0; // 2; //set so that all data sent before next batch of i2s data // Delay between sending two ESPNOW data, unit: ms. //  range 0 65535 default 1000
+static uint16_t ESPNOW_SEND_DELAY = 1; // 2; //set so that all data sent before next batch of i2s data // Delay between sending two ESPNOW data, unit: ms. //  range 0 65535 default 1000
 #else
 #ifdef IS_SINK
 static bool paired_w_source;
@@ -26,13 +26,15 @@ static uint16_t ESPNOW_SEND_DELAY = 1000; // 2; //set so that all data sent befo
 // #pragma region I2S_CONFIG
 static uint32_t SAMPLE_RATE = 48000;                             // 96000U;
 static i2s_data_bit_width_t BIT_DEPTH = I2S_DATA_BIT_WIDTH_32BIT; // I2S_DATA_BIT_WIDTH_32BIT;
-static uint16_t DMA_FRAME_NUM = 128;
+static uint16_t DMA_FRAME_NUM = 64;
 static uint8_t DMA_DESC_NUM = 2; // 3 or 4 seems to work best with minimal delay
 // static uint8_t bytes_per_sample = 4;
 static size_t bytes_to_read;
 //ring buffer index
 uint32_t rbuffer_start, rbuffer_end;
 uint8_t PAYLOAD_SIZE;
+
+static uint8_t TASK_DELAY_PERIOD = 2;
 
 // static uint16_t I2S_BUF_SIZ = 2048;
 RingbufHandle_t rbuf_handle;
@@ -194,19 +196,23 @@ IRAM_ATTR static void i2s_rec_task(void *pvParameters)
         i2s_channel_read(i2s0_rx_handler, I2S_RX_BUF, bytes_to_read, &bytes_read, pdMS_TO_TICKS(10000));//portMAX_DELAY);
 
          
-        if(xRingbufferGetCurFreeSize(rbuf_handle) < bytes_read){//xRingbufferGetMaxItemSize(rbuf_handle) /4 ){//<= bytes_read){
-            
-            xSemaphoreTake(i2s_sync_h, pdMS_TO_TICKS(1000));
-            continue;
-        }
+
         bRead = bytes_read;
+        if(xRingbufferGetCurFreeSize(rbuf_handle) < bytes_read){//xRingbufferGetMaxItemSize(rbuf_handle) /4 ){//<= bytes_read){
+            ESP_LOGI(TAG, "ERR_ Not Enough Buffer Speace  %d / %d ", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
+            xSemaphoreTake(i2s_sync_h, pdMS_TO_TICKS(100));
+            //continue;
+        }
+        //bRead = bytes_read;
         //memcpy(ESPNOW_I2S_BUF, I2S_RX_BUF, bRead);
         //ESP_LOGI(TAG, "Freespace : %d / %d", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
        // if(xRingbufferGetCurFreeSize(rbuf_handle) < bytes_read){
         //    ESP_LOGE(TAG, "Overrun");
        // }
-        if(xRingbufferSend(rbuf_handle, I2S_RX_BUF, bytes_read, pdMS_TO_TICKS(1000)) != pdTRUE){
+        if(xRingbufferSend(rbuf_handle, I2S_RX_BUF, bytes_read, pdMS_TO_TICKS(100)) != pdTRUE){
             ESP_LOGI(TAG, "ERR failed to dump data into ring buffer");
+        }else{
+                //ESP_LOGI(TAG, "I2S Dump  %d / %d ", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
         }
         xSemaphoreGive(xsh);
         // xSemaphoreTake(xsh);
@@ -250,7 +256,7 @@ static void i2s_tx_task(void *pvParameters)
     }
 }
 #ifdef EN_SPDIF
-static void i2s_spdif_task(void *pvParameters)
+IRAM_ATTR static void i2s_spdif_task(void *pvParameters)
 {
     // size_t bytes_read;
     // uint8_t audio_buffer[1024];
@@ -259,7 +265,7 @@ static void i2s_spdif_task(void *pvParameters)
     size_t data_siz;
    // size_t data_siz_remaining;
    //wait for some data to fill buffer
-   while (xRingbufferGetCurFreeSize(rbuf_handle) > xRingbufferGetMaxItemSize(rbuf_handle) / 4 * 3)
+   while (xRingbufferGetCurFreeSize(rbuf_handle) > xRingbufferGetMaxItemSize(rbuf_handle) / 4 * 3)//* 2)
    {
         xSemaphoreTake(i2s_sync_h,  pdMS_TO_TICKS(50));
    }
@@ -286,6 +292,7 @@ static void i2s_spdif_task(void *pvParameters)
                 //data doesnt wrap around so process as is
                 spdif_write(frame_buf_ptr, data_siz);
                 vRingbufferReturnItem(rbuf_handle,(void*) frame_buf_ptr);
+               // ESP_LOGI(TAG, "RingBuffer %d / %d", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
             }
             xSemaphoreGive(xsh);
         }else{
@@ -294,7 +301,7 @@ static void i2s_spdif_task(void *pvParameters)
             xSemaphoreTake(i2s_sync_h, portMAX_DELAY);
         }
 
-        //ESP_LOGI(TAG, "RingBuffer %d / %d", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
+        
     }
 }
 
@@ -323,7 +330,6 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
     buf->state = send_param->state;
 
     buf->crc = 0;
-    size_t tmp;
 
 #ifdef IS_SOURCE
     buf->src_sink = espnow_bd_source;
@@ -343,23 +349,7 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
         {
             buf->src_sink |= espnow_bd_SOF_L;
             espnow_seq[buf->type] = 0;
-            //xSemaphoreGive(i2s_sync_h);
-            //xSemaphoreTake(xsh, portMAX_DELAY);
-            //espnow is faster than i2s receiving, buffer is almost always empty
-            //all audio data in buffer has been sent, fill buffer  
-            //  if (xRingbufferGetCurFreeSize(rbuf_handle) == xRingbufferGetMaxItemSize(rbuf_handle))
-            //  {
-            //     //     ESP_LOGE(TAG, "Underrun");
-            //     // while (xRingbufferGetCurFreeSize(rbuf_handle) > xRingbufferGetMaxItemSize(rbuf_handle) / 2)
-            //     // {
-            //         //ESP_LOGI(TAG, "Freespace : %d / %d", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
-            //         //
-            //         xSemaphoreTake(xsh, portMAX_DELAY);// pdMS_TO_TICKS(20));
-            //     // }
-            //  }
         }
-
-
              if (xRingbufferGetCurFreeSize(rbuf_handle) == xRingbufferGetMaxItemSize(rbuf_handle))
              {
                 //     ESP_LOGE(TAG, "Underrun");
@@ -367,6 +357,7 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
                 // {
                     //ESP_LOGI(TAG, "Freespace : %d / %d", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
                     //
+                    xSemaphoreGive(i2s_sync_h);
                     xSemaphoreTake(xsh, portMAX_DELAY);// pdMS_TO_TICKS(20));
                 // }
              }
@@ -379,7 +370,10 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
             }else{
                 payload_buf = (uint8_t*)xRingbufferReceiveUpTo(rbuf_handle, &buffer_size, pdMS_TO_TICKS(100), PAYLOAD_SIZE);
                 //ESP_LOGI(TAG, "Reading Buffer %u", PAYLOAD_SIZE);
-            }            
+            }         
+            if(payload_buf == NULL){
+                ESP_LOGI(TAG, "ERR ");
+            }
          }
 
         if(payload_buf != NULL){
@@ -414,11 +408,11 @@ IRAM_ATTR /* inline */ void espnow_prepare_data(espnow_send_param_t *send_param)
                 // xSemaphoreGive(i2s_sync_h);
             // ESP_LOGI(TAG, "END  %d / %d", bSent, bRead);
                 //ESP_LOGI(TAG, "END  %d / %d , Heap : %lu", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle), esp_get_free_heap_size());
-                ESP_LOGI(TAG, "END  %d / %d ", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
+                //ESP_LOGI(TAG, "END  %d / %d ", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
                 // ESP_LOGI(TAG, "Remaining heap %lu", esp_get_free_heap_size() );   
                 buf->src_sink |= espnow_bd_EOF;
                 bSent = 0;
-                vTaskDelay(2 / portTICK_PERIOD_MS);
+                vTaskDelay(pdMS_TO_TICKS(TASK_DELAY_PERIOD));
             }
         }else{
                 ESP_LOGI(TAG, "Payload NULL  %d / %d ", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
@@ -666,8 +660,9 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
             {
                 ESP_LOGI(TAG, "Ring Buffer Send Error");
             }
+            //ESP_LOGI(TAG, "End of frame %d / %d", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
             xSemaphoreGive(i2s_sync_h);
-            vTaskDelay(2/portTICK_PERIOD_MS);
+            vTaskDelay(pdMS_TO_TICKS(TASK_DELAY_PERIOD));
             // ESP_LOGI(TAG, "End of frame %lu / %u", idx, sizeof(ESPNOW_I2S_BUF));
             bSent = idx;
             idx = 0;
@@ -688,6 +683,7 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
             idx = 0;
             seq_prev = 0;
             xSemaphoreGive(i2s_sync_h);
+            vTaskDelay(pdMS_TO_TICKS(TASK_DELAY_PERIOD));
         }
 
 #endif
@@ -1028,7 +1024,7 @@ static esp_err_t espnow_init()
     espnow_prepare_data(send_param);
     // ESP_NOW_MAX_DATA_LEN;
     //xTaskCreate(espnow_task, "espnow_task", 8192, send_param, 13, NULL); // 2048
-    xTaskCreatePinnedToCore(espnow_task,  "espnow_task", 8192, send_param, 6, NULL, 1);
+    xTaskCreatePinnedToCore(espnow_task,  "espnow_task", 8192, send_param, 16, NULL, 1);
     return ESP_OK;
 }
 
@@ -1073,7 +1069,7 @@ void app_main()
     }
 #endif
 #ifdef IS_SOURCE
-    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t) /*DMA_DESC_NUM * DMA_FRAME_NUM * 2 * BIT_DEPTH / 2*/ /*I2S_BUF_SIZ * sizeof(uint32_t)  * 2 */, RINGBUF_TYPE_BYTEBUF);// RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
+    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t) / 2 /*DMA_DESC_NUM * DMA_FRAME_NUM * 2 * BIT_DEPTH / 2*/ /*I2S_BUF_SIZ * sizeof(uint32_t)  * 2 */, RINGBUF_TYPE_BYTEBUF);// RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
     if(rbuf_handle == NULL){
         ESP_LOGE(TAG, "ERR Failed to create buffer");   
     }else{
@@ -1099,4 +1095,15 @@ void app_main()
     xTaskCreate(i2s_spdif_task, "i2s_spdif_task", 4096, NULL, 2, NULL); // 2048
 #endif
 #endif
+   // TASK_DELAY_PERIOD = DMA_FRAME_NUM * 1000 / SAMPLE_RATE;
+   #ifdef IS_SOURCE
+    TASK_DELAY_PERIOD = 2;
+   #else
+    TASK_DELAY_PERIOD = 1;
+   #endif
+
+    while(1){
+    ESP_LOGI(TAG, "Main Thread: %d / %d", xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
