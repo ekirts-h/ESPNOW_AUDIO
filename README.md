@@ -11,6 +11,9 @@ Very slight delay between source and sink side playback.
 Noticeable when source and sink playing at the same time.
 
 ToDO:
+change to esp-now and change number of retries
+https://github.com/espressif/esp-now/tree/master
+
 cleanup code, change wifi menuconfig settings for rx/tx.
 try get 96KHz to work 
 maybe try MCS7 again
