@@ -11,8 +11,7 @@ Very slight delay between source and sink side playback.
 Noticeable when source and sink playing at the same time.  
 
 ToDO:
-change to broadcast based so there is no wait for an ack, make different data packet formatting for different purposes
-
+~change to broadcast based so there is no wait for an ack, make different data packet formatting for different purposes~
 cleanup code, change wifi menuconfig settings for rx/tx.  
 ~maybe try MCS7 again~  
 ~maybe dedicated threads for send | receive~  
@@ -27,4 +26,4 @@ Change to Ring Buffer
 Working with Source side I2S_receive at 48KHz/32b 64 frame_num and 2 desc_num  
 96KHz/32Bit  Frame=256 Desc_num = 2
 Dedicated thread for tx/rx  
-
+Change to Broadcast 
