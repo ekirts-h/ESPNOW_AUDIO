@@ -25,6 +25,6 @@ move parts of code to different files
 Done:  
 Change to Ring Buffer  
 Working with Source side I2S_receive at 48KHz/32b 64 frame_num and 2 desc_num  
-96KHz/32Bit  
+96KHz/32Bit  Frame=256 Desc_num = 2
 Dedicated thread for tx/rx  
 
