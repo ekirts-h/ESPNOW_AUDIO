@@ -1,3 +1,5 @@
+// extern "C" {
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,9 +19,18 @@
 #include "esp_netif.h"
 #include "esp_mac.h"
 #include "esp_crc.h"
-#include "esp_chip_info.h"
-#include "esp_private/wifi.h"
 
+// #include "mbedtls/base64.h"
+// #include "espnow.h"
+// #include "espnow_ctrl.h"
+// #include "esp_utils.h"
+
+// #include "esp_chip_info.h"
+// #include "esp_private/wifi.h"
+#include "freertos/ringbuf.h"
+// #include <espnow_ctrl.h>
+//  #include <espnow.h>
+// #include <espnow_utils.h>
 
 #define ESP32
 //#define ESP32_S3
@@ -90,22 +101,37 @@
             Length of ESPNOW data to be sent, unit: byte.
  */
 
-enum{
-    espnow_bd_sink,
-    espnow_bd_source,
-    espnow_bd_SOF_L,
-    espnow_bd_EOF = 4,
+typedef enum{
+    espnow_bd_sink = 0x00,
+    espnow_bd_source = 0x01,
+    espnow_bd_SOF_L = 0x02,
+    espnow_bd_EOF = 0x04,
+    espnow_bd_CONFIG = 0x08,
+    espnow_bd_DATA = 0x010,
+    espnow_bd_KEEPALIVE = 0x20,
+    espnow_bd_CONFIG_OK = 0x40,
+    espnow_bd_R = 0x80,
+} frame_conf_byte_id_t;
+
+/*The multicast MAC address is a special value that begins with 01-00-5E in hexadecimal.
+ The remaining portion of the multicast MAC address is created by converting the lower 23 bits of the IP multicast group address into 6 hexadecimal characters. 
+*/
+
+//use broadcast for sending data, when data is detected being transmitted after reset / startup then request config 
+
+enum{//b0
+    espnow_broadcast_request_conf = 0x00,
+    espnow_broadcast_ok = 0x01 ,
+    espnow_broadcast_se = 0x02 ,
+    //espnow_broadcast_re
 };
 
-enum{
-    espnow_broadcast_ng,
-    espnow_broadcast_ok,
-};
-
-static QueueHandle_t espnow_queue;
+static QueueHandle_t espnow_tx_queue;
+static QueueHandle_t espnow_rx_queue;
 
 static uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-static uint8_t multicasttest_mac[ESP_NOW_ETH_ALEN] = {0x94, 0xE6, 0x86, 0x12, 0x29, 0xF8};
+static uint8_t multicast_mac[ESP_NOW_ETH_ALEN] = { 0x01, 0x00, 0x5E, 0xFF, 0xFF, 0xFF };
+// static uint8_t multicasttest_mac[ESP_NOW_ETH_ALEN] = {0x94, 0xE6, 0x86, 0x12, 0x29, 0xF8};
 //f4:12:fa:84:78:4c
 typedef enum {
     ESPNOW_SEND_CB,
@@ -115,7 +141,7 @@ typedef enum {
 enum {
     ESPNOW_DATA_BROADCAST,
     ESPNOW_DATA_UNICAST,
-   // ESPNOW_DATA_MULTICAST,
+    ESPNOW_DATA_MULTICAST,
     ESPNOW_DATA_MAX,
 };
 typedef struct {
@@ -151,16 +177,25 @@ typedef struct {
     uint8_t payload[0];//ESPNOW_SEND_LEN];                   //Real payload of ESPNOW data.//0   since espnow_data_t is sent  payload size is smaller
 } __attribute__((packed)) espnow_data_t;   // tells compiler to not add padding   so 10 byte doesnt become 12 etc to align data (32bit sys = 4 bytes)
 
+
+
+
+
+
+
 typedef struct{
     bool unicast;                         //Send unicast ESPNOW data.
     bool broadcast;                       //Send broadcast ESPNOW data.
-  //  bool multicast;
+    bool multicast;
+    bool config;                          //indicating to send config data or waiting for config data
+    bool data;                            //indicate transmitting data
     uint8_t state;                        //Indicate that if has received broadcast ESPNOW data or not.
     uint8_t src_sink;                       //Magic number which is used to determine which device to send unicast ESPNOW data.
-    uint16_t count;                       //Total count of unicast ESPNOW data to be sent.
-    uint16_t delay;                       //Delay between sending two ESPNOW data, unit: ms.
+   // uint16_t count;                       //Total count of unicast ESPNOW data to be sent.
+   // uint16_t delay;                       //Delay between sending two ESPNOW data, unit: ms.
     int len;                              //Length of ESPNOW data to be sent, unit: byte.
     uint8_t *buffer;                      //Buffer pointing to ESPNOW data.
     uint8_t dest_mac[ESP_NOW_ETH_ALEN];   //MAC address of destination device.
 
 } espnow_send_param_t;
+// }
