@@ -29,11 +29,12 @@ static uint16_t ESPNOW_SEND_DELAY = 1000; // 2; //set so that all data sent befo
 static uint32_t test_counter = 0;
 static uint32_t test_counter_prev = 0;
 static uint32_t packet_count_total = 0;
+static uint32_t packet_bytes = 0;
 
 // #pragma region I2S_CONFIG
-static uint32_t SAMPLE_RATE = 48000;                              // 96000U;
+static uint32_t SAMPLE_RATE = 96000;                              // 96000U;
 static i2s_data_bit_width_t BIT_DEPTH = I2S_DATA_BIT_WIDTH_32BIT; // I2S_DATA_BIT_WIDTH_32BIT;
-static uint16_t DMA_FRAME_NUM = 32;
+static uint16_t DMA_FRAME_NUM = 256;
 static uint8_t DMA_DESC_NUM = 2;
 static size_t bytes_to_read;
 // ring buffer index
@@ -273,10 +274,10 @@ IRAM_ATTR static void i2s_spdif_task(void *pvParameters)
     size_t data_siz;
     // size_t data_siz_remaining;
     // wait for some data to fill buffer
-    while (xRingbufferGetCurFreeSize(rbuf_handle) > xRingbufferGetMaxItemSize(rbuf_handle) / 4 * 3) //* 2)
-    {
-        xSemaphoreTake(i2s_sync_h, pdMS_TO_TICKS(50));
-    }
+    // while (xRingbufferGetCurFreeSize(rbuf_handle) > xRingbufferGetMaxItemSize(rbuf_handle) / 4 * 3) //* 2)
+    // {
+    //     xSemaphoreTake(i2s_sync_h, pdMS_TO_TICKS(50));
+    // }
 
     while (1)
     {
@@ -412,6 +413,7 @@ void espnow_prepare_data(espnow_send_param_t *send_param)
                 buf->seq_num = espnow_seq[buf->type]++;
                 send_param->len = buffer_size + sizeof(espnow_data_t);
                 test_counter++;
+                packet_bytes += buffer_size;
                 // payload_buf = NULL;
                 //ESP_LOGI(TAG, "test6" );
                 if (bSent >= bRead)
@@ -993,7 +995,8 @@ IRAM_ATTR static void espnow_tx_task(void *pvParameter)
             {
                 if (send_param->broadcast == false)
                 {
-                    break;
+                    continue;
+                    //break;
                 }
                 ESP_LOGD(TAG, "Sent Broadcast_x");
                 /* Delay a while before sending the next data. */
@@ -1040,7 +1043,7 @@ static esp_err_t espnow_init()
     // esp_wifi_internal_set_fix_rate(ESP_IF_WIFI_STA, true, WIFI_PHY_RATE_MCS2_SGI);//WIFI_PHY_RATE_MCS7_SGI
     esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_ABOVE);
     // esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    ESP_ERROR_CHECK(esp_wifi_config_espnow_rate(ESP_IF_WIFI_STA, WIFI_PHY_RATE_MCS3_SGI)); // WIFI_PHY_RATE_54M));//WIFI_PHY_RATE_MCS7_SGI);// WIFI_PHY_RATE_54M));
+    ESP_ERROR_CHECK(esp_wifi_config_espnow_rate(ESP_IF_WIFI_STA, WIFI_PHY_RATE_MCS5_SGI)); // WIFI_PHY_RATE_54M));//WIFI_PHY_RATE_MCS7_SGI);// WIFI_PHY_RATE_54M));
     // esp_wifi_set_protocol(ESP_IF_WIFI_STA,WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR)
     // esp_wifi_set_protocol()
     //  Initialize ESP-NOW
@@ -1123,8 +1126,8 @@ static esp_err_t espnow_init()
     //espnow_prepare_data(send_param);
     // ESP_NOW_MAX_DATA_LEN;
     // xTaskCreate(espnow_task, "espnow_task", 8192, send_param, 13, NULL); // 2048
-    xTaskCreatePinnedToCore(espnow_tx_task, "espnow_tx_task", 10240, send_param, 16, NULL, tskNO_AFFINITY);
-    xTaskCreatePinnedToCore(espnow_rx_task, "espnow_rx_task", 4096, send_param, 16, NULL, tskNO_AFFINITY);
+    xTaskCreatePinnedToCore(espnow_tx_task, "espnow_tx_task", 4096, send_param, 16, NULL, tskNO_AFFINITY);
+    xTaskCreatePinnedToCore(espnow_rx_task, "espnow_rx_task", 10240, send_param, 16, NULL, tskNO_AFFINITY);
     return ESP_OK;
 }
 
@@ -1162,7 +1165,7 @@ void app_main()
     // separate unicast tx thread
     PAYLOAD_SIZE = ESPNOW_MAX_PAYLOAD_SIZE - sizeof(espnow_data_t);
 #ifdef IS_SINK
-    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t), RINGBUF_TYPE_BYTEBUF); // RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
+    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t) * 2 , RINGBUF_TYPE_BYTEBUF); // RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
     if (rbuf_handle == NULL)
     {
         ESP_LOGE(TAG, "ERR Failed to create buffer");
@@ -1173,7 +1176,7 @@ void app_main()
     }
 #endif
 #ifdef IS_SOURCE
-    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t) / 2/*DMA_DESC_NUM * DMA_FRAME_NUM * 2 * BIT_DEPTH / 2*/ /*I2S_BUF_SIZ * sizeof(uint32_t)  * 2 */, RINGBUF_TYPE_BYTEBUF); // RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
+    rbuf_handle = xRingbufferCreate(I2S_BUF_SIZ * sizeof(uint32_t) * 2/*DMA_DESC_NUM * DMA_FRAME_NUM * 2 * BIT_DEPTH / 2*/ /*I2S_BUF_SIZ * sizeof(uint32_t)  * 2 */, RINGBUF_TYPE_BYTEBUF); // RINGBUF_TYPE_BYTEBUF);// _NOSPLIT);
     if (rbuf_handle == NULL)
     {
         ESP_LOGE(TAG, "ERR Failed to create buffer");
@@ -1194,7 +1197,7 @@ void app_main()
     i2s_channel_init_std_mode(i2s0_rx_handler, &i2s_port_conf);
     i2s_channel_enable(i2s0_rx_handler);
     // xTaskCreate(i2s_rec_task, "i2s_rec_task", 2048, NULL, 16, NULL); // 2048
-    xTaskCreatePinnedToCore(i2s_rec_task, "i2s_rec_task", 4096, NULL, 16, NULL, tskNO_AFFINITY); // 2048
+    xTaskCreatePinnedToCore(i2s_rec_task, "i2s_rec_task", 2048, NULL, 16, NULL, tskNO_AFFINITY); // 2048
 #ifdef EN_SPDIF
     spdif_init(96000);
     xTaskCreate(i2s_spdif_task, "i2s_spdif_task", 4096, NULL, 2, NULL); // 2048
@@ -1215,9 +1218,11 @@ void app_main()
        // ESP_LOGI(TAG, "MT: counter: d_%lu approx_bytes/s: %lu space: %d / %d", test_counter- test_counter_prev, (test_counter- test_counter_prev) * 243 * 10 ,  xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
         if(counter_sec == 9){
             packet_count_total += (test_counter - test_counter_prev) ;
-        ESP_LOGI(TAG, "MT: counter: d_%lu bytes/s: %lu space: %d / %d", packet_count_total, packet_count_total * 250,  xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
+        ESP_LOGI(TAG, "MT: counter: d_%lu audio B/s %lu space: %d / %d", packet_count_total, packet_bytes,  xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
             packet_count_total = 0 ;
             counter_sec = 0;
+                packet_bytes = 0;
+
         }
          else{
         //     ESP_LOGI(TAG, "MT: counter: d_%lu bytes/100ms: %lu space: %d / %d", test_counter- test_counter_prev, (test_counter- test_counter_prev) * 243,  xRingbufferGetCurFreeSize(rbuf_handle), xRingbufferGetMaxItemSize(rbuf_handle));
