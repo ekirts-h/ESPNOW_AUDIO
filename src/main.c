@@ -30,7 +30,7 @@ static uint32_t test_counter = 0;
 static uint32_t test_counter_prev = 0;
 static uint32_t packet_count_total = 0;
 static uint32_t packet_bytes = 0;
-
+// 48000 frame=32 desc=2
 // #pragma region I2S_CONFIG
 static uint32_t SAMPLE_RATE = 96000;                              // 96000U;
 static i2s_data_bit_width_t BIT_DEPTH = I2S_DATA_BIT_WIDTH_32BIT; // I2S_DATA_BIT_WIDTH_32BIT;
@@ -188,6 +188,7 @@ static void espnow_deinit(espnow_send_param_t *send_param)
 // Task to read audio data from I2S and send it via ESP-NOW
 IRAM_ATTR static void i2s_rec_task(void *pvParameters)
 {
+
     size_t bytes_read;
     uint8_t* tmpdata;
     size_t tmp;
@@ -477,7 +478,7 @@ void espnow_prepare_data(espnow_send_param_t *send_param)
 
         
         send_param->len = 10 + sizeof(espnow_data_t);
-       // buf->src_sink |= espnow_bd_CONFIG;
+        buf->src_sink |= espnow_bd_CONFIG;
         // buf->payload[0] = espnow_bd_source;
         buf->payload[1] = (uint8_t)((SAMPLE_RATE >> 24) & 0xff);
         buf->payload[2] = (uint8_t)((SAMPLE_RATE >> 16) & 0xFF);
@@ -495,7 +496,7 @@ void espnow_prepare_data(espnow_send_param_t *send_param)
         //isAudioData
 #else
 #ifdef IS_SINK
-        buf->src_sink = espnow_bd_sink;
+        buf->src_sink |= espnow_bd_CONFIG;
 
         if(send_param->config){
             //while
@@ -612,7 +613,7 @@ espnow_bd_RSD = 0x80,*/
 
 #else
 #ifdef IS_SINK
-        if (buf->src_sink == espnow_bd_source)
+        if ((buf->src_sink & espnow_bd_source) == espnow_bd_source && (buf->src_sink & espnow_bd_CONFIG) == espnow_bd_CONFIG)
         {
             paired = true;
             SAMPLE_RATE = ((uint32_t)buf->payload[1] << 24) | ((uint32_t)buf->payload[2] << 16) | ((uint32_t)buf->payload[3] << 8) | (uint32_t)buf->payload[4];
@@ -781,7 +782,7 @@ espnow_bd_RSD = 0x80,*/
 // ESP-NOW send callback
 void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-
+            //ESP_LOGI(TAG, "TEST4");
     espnow_event_t event;
     espnow_event_send_cb_t *send_cb = &event.info.send_cb;
 
@@ -801,6 +802,7 @@ void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
 
 static void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len)
 {
+                //ESP_LOGI(TAG, "TEST2");
     espnow_event_t evt;
     espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
     uint8_t *mac_addr = recv_info->src_addr;
@@ -840,6 +842,7 @@ IRAM_ATTR static void espnow_rx_task(void *pvParameter){
     espnow_send_param_t *send_param = (espnow_send_param_t *)pvParameter;
     vTaskDelay(pdMS_TO_TICKS(100));
     while (xQueueReceive(espnow_rx_queue, &evt, portMAX_DELAY) == pdTRUE){
+            //ESP_LOGI(TAG, "TEST1");
             espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
             ret = espnow_data_parse(recv_cb->data, recv_cb->data_len, &recv_state, &recv_seq, &recv_src_sink);
             free(recv_cb->data);
@@ -873,10 +876,16 @@ IRAM_ATTR static void espnow_rx_task(void *pvParameter){
                 }
                 else
                 {
+                    #ifdef IS_SOURCE
+                    if (recv_seq == 0 || (((recv_src_sink & espnow_bd_CONFIG) == espnow_bd_CONFIG) && ((recv_src_sink & espnow_bd_sink) == espnow_bd_sink)))
+                    #endif
+                    #ifdef IS_SINK
+                    if (recv_seq == 0 || (((recv_src_sink & espnow_bd_CONFIG) == espnow_bd_CONFIG) && ((recv_src_sink & espnow_bd_source) == espnow_bd_source)))
+                    #endif
                     // resend config info if broadcast sequence number is 0
-                    if (recv_seq == 0 || ((recv_src_sink & espnow_bd_CONFIG) == espnow_bd_CONFIG))
+                    //if (recv_seq == 0 || ((recv_src_sink & espnow_bd_CONFIG) == espnow_bd_CONFIG))
                     {
-                        ESP_LOGI(TAG, "Resent broacast to Peer " MACSTR ", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr));
+                        ESP_LOGI(TAG, "Resend broacast to Peer " MACSTR ", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr));
                         memcpy(send_param->dest_mac, broadcast_mac, ESP_NOW_ETH_ALEN);
                         // send_param->broadcast = true;
                         // send_param->unicast = false;
@@ -892,6 +901,7 @@ IRAM_ATTR static void espnow_rx_task(void *pvParameter){
                         }
                         else
                         {
+                        ESP_LOGI(TAG, "Resent broacast to Peer " MACSTR ", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr));
                             send_param->broadcast = false;
                             send_param->unicast = true;
                             send_param->state = 1;
@@ -911,7 +921,7 @@ IRAM_ATTR static void espnow_rx_task(void *pvParameter){
                      * receives ESPNOW data.
                      */
                     // make source start unicast
-                    if (send_param->unicast == false && (recv_src_sink == espnow_bd_sink))
+                    if (send_param->unicast == false && ((recv_src_sink & espnow_bd_sink) == espnow_bd_sink))
                     {
 #ifdef IS_SOURCE
                         // send_param->src_sink = recv_src_sink++;
@@ -1041,9 +1051,12 @@ IRAM_ATTR static void espnow_tx_task(void *pvParameter)
 static esp_err_t espnow_init()
 { // 54 has too high of an corruption/loss rate
     // esp_wifi_internal_set_fix_rate(ESP_IF_WIFI_STA, true, WIFI_PHY_RATE_MCS2_SGI);//WIFI_PHY_RATE_MCS7_SGI
+
+    //esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
     esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_ABOVE);
     // esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    ESP_ERROR_CHECK(esp_wifi_config_espnow_rate(ESP_IF_WIFI_STA, WIFI_PHY_RATE_MCS5_SGI)); // WIFI_PHY_RATE_54M));//WIFI_PHY_RATE_MCS7_SGI);// WIFI_PHY_RATE_54M));
+    ESP_ERROR_CHECK(esp_wifi_config_espnow_rate(ESP_IF_WIFI_STA, WIFI_PHY_RATE_MCS3_SGI)); // WIFI_PHY_RATE_54M));//WIFI_PHY_RATE_MCS7_SGI);// WIFI_PHY_RATE_54M));
     // esp_wifi_set_protocol(ESP_IF_WIFI_STA,WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR)
     // esp_wifi_set_protocol()
     //  Initialize ESP-NOW
@@ -1149,11 +1162,12 @@ void app_main()
     esp_netif_init();
     esp_event_loop_create_default();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    //search for least conjected channel then start at default channel, when paired send channel to use to paired device
     esp_wifi_init(&cfg);
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_start();
-   espnow_init();
+    espnow_init();
     
 
 
