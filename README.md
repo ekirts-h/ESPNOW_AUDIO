@@ -10,6 +10,8 @@ AMPDU off
 Very slight delay between source and sink side playback.   
 Noticeable when source and sink playing at the same time.  
 
+Susceptible to interference at higher PHY rates, at MCS6 moving a wireless mouse around was enough to cause audio to skip 
+
 ToDO:
 ~change to broadcast based so there is no wait for an ack, make different data packet formatting for different purposes~
 cleanup code, change wifi menuconfig settings for rx/tx.  
